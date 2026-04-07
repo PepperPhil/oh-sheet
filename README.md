@@ -81,7 +81,7 @@ as a stateless worker that takes an `OrchestratorCommand` and returns a
 
 ## TuneChat Integration
 
-Oh Sheet can optionally deliver results to [TuneChat](https://github.com/robin-raq/TuneChat) — a real-time collaborative music learning platform by [Raq Dominique](https://github.com/robin-raq). When results are pushed to a TuneChat room, users can view interactive sheet music, play along on a shared piano, and get AI coaching.
+Oh Sheet can optionally deliver results to [TuneChat](https://github.com/robin-raq/TuneChat) — a real-time collaborative music learning platform. When results are pushed to a TuneChat room, users can view interactive sheet music, play along on a shared piano, and get AI coaching.
 
 **Endpoints on TuneChat's side (already implemented):**
 
