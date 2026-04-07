@@ -79,6 +79,28 @@ as a stateless worker that takes an `OrchestratorCommand` and returns a
 - `POST /v1/stages/humanize`
 - `POST /v1/stages/engrave`
 
+## TuneChat Integration
+
+Oh Sheet can optionally deliver results to [TuneChat](https://github.com/robin-raq/TuneChat) — a real-time collaborative music learning platform by [Raq Dominique](https://github.com/robin-raq). When results are pushed to a TuneChat room, users can view interactive sheet music, play along on a shared piano, and get AI coaching.
+
+**Endpoints on TuneChat's side (already implemented):**
+
+```bash
+# Send progress updates to a room
+POST https://<tunechat>/api/v1/service/rooms/{room_id}/messages
+  Authorization: Bearer $SERVICE_TOKEN
+  {"text": "Arranging for piano...", "display_as": "Pipeline"}
+
+# Deliver completed artifacts
+POST https://<tunechat>/api/v1/service/rooms/{room_id}/artifacts
+  Authorization: Bearer $SERVICE_TOKEN
+  {"job": {"job_id": "...", "status": "completed"},
+   "artifacts": [{"kind": "musicxml", "url": "..."}],
+   "title": "Song Title"}
+```
+
+Full API spec: [TuneChat API Contracts](https://github.com/robin-raq/TuneChat/blob/master/docs/api-contracts.md)
+
 ## Tests
 
 ```bash
