@@ -1,11 +1,71 @@
 # Oh Sheet
 
-FastAPI backend for the **Song to Humanized Piano Sheet Music** pipeline.
+An automated pipeline that transforms any song into playable piano sheet music. Upload an MP3 or MIDI file, and Oh Sheet transcribes, arranges, humanizes, and engraves it into a PDF and interactive MusicXML score.
 
-This is the REST + WebSocket layer that exposes the 5-stage pipeline
-(`ingest → transcribe → arrange → humanize → engrave`) defined in
-[`api-contracts-v2.md`](../temp1/api-contracts-v2.md), schema version
-`3.0.0`.
+## How It Works
+
+```
+MP3 / MIDI / Song Link
+        │
+        ▼
+┌─── INGEST ───┐    Validate input, normalize audio, extract metadata
+└───────┬───────┘
+        ▼
+┌─ TRANSCRIBE ─┐    Full-mix audio → MIDI (MT3 / custom conformer)
+│              │    Chord detection, beat tracking, key/tempo analysis
+└───────┬───────┘
+        ▼
+┌── ARRANGE ───┐    Multi-instrument MIDI → two-handed piano score
+│              │    Melody → right hand, bass + chords → left hand
+└───────┬───────┘
+        ▼
+┌── HUMANIZE ──┐    Add micro-timing, velocity dynamics, pedal marks
+│              │    Makes it sound played by a human, not a computer
+└───────┬───────┘
+        ▼
+┌── ENGRAVE ───┐    Piano score → MusicXML → LilyPond → PDF
+│              │    Publication-quality sheet music
+└───────┬───────┘
+        ▼
+  PDF + MusicXML + Humanized MIDI
+```
+
+### Pipeline Variants
+
+| Variant | Entry Point | Stages | Use Case |
+|---------|-------------|--------|----------|
+| `full` | Song title/link | 1 → 2 → 3 → 4 → 5 | "Turn this Spotify song into sheet music" |
+| `audio_upload` | MP3/WAV file | 2 → 3 → 4 → 5 | User uploads their own audio |
+| `midi_upload` | MIDI file | 3 → 4 → 5 | Skip transcription, arrange existing MIDI |
+| `sheet_only` | Audio/MIDI | 1/2 → 3 → 5 | Skip humanization, quantized output only |
+
+### Data Flow Between Stages
+
+```
+InputBundle          TranscriptionResult      PianoScore
+  audio ──────────►   stems (separated)  ──►   right_hand[]
+  midi (optional)     midi_tracks[]            left_hand[]
+  metadata            harmonic_analysis        metadata (key, tempo, difficulty)
+                        chords[]
+                        sections[]
+
+PianoScore           HumanizedPerformance     EngravedOutput
+  ──────────────►     expressive_notes[] ──►   pdf (bytes)
+                      expression_map           musicxml (string)
+                        dynamics               humanized_midi (bytes)
+                        articulations
+                        pedal_events
+```
+
+## Tech Stack
+
+| Stage | Primary Tool | Fallback |
+|-------|-------------|----------|
+| Transcription | MT3 / Custom Conformer | Basic Pitch |
+| Chord/Structure | madmom | librosa |
+| Arrangement | music21 | LLM (GPT-4) |
+| Humanization | Rule-based + ML | — |
+| Engraving | LilyPond | MuseScore CLI |
 
 ## Status
 
@@ -14,7 +74,9 @@ stub that returns shape-correct contract objects but does **not** run real ML
 inference, `music21`, LilyPond, etc. The wrappers will delegate to the
 existing pipeline implementations in a follow-up PR.
 
-## Layout
+## Architecture
+
+### Backend (FastAPI)
 
 ```
 ohsheet/
@@ -39,8 +101,22 @@ ohsheet/
         ├── health.py
         ├── uploads.py   # POST /v1/uploads/{audio,midi} → Claim-Check URIs
         ├── jobs.py      # POST /v1/jobs, GET /v1/jobs/{id}, list
-        ├── stages.py    # POST /v1/stages/{ingest,…} — worker envelope per §1
+        ├── stages.py    # POST /v1/stages/{ingest,…} — worker envelope
         └── ws.py        # WS  /v1/jobs/{id}/ws — live event stream
+```
+
+### System Overview
+
+```
+┌──────────────┐                ┌──────────────┐                ┌──────────────┐
+│  Oh Sheet    │   job request  │  Oh Sheet    │   artifacts    │  TuneChat    │
+│  Frontend    │ ──────────────►│  Pipeline    │ ──────────────►│  (optional)  │
+│  (SPA)       │                │  (FastAPI)   │                │              │
+│              │◄─── progress ──│              │                │  Rooms       │
+│  Upload      │   via WS      │  MT3         │                │  Shared Piano│
+│  Progress    │                │  music21     │                │  AI Coach    │
+│  Download    │                │  LilyPond    │                │  Live Playback│
+└──────────────┘                └──────────────┘                └──────────────┘
 ```
 
 ## Run
