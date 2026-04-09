@@ -23,11 +23,18 @@ services:
     environment:
       OHSHEET_BLOB_ROOT: /app/blob
       OHSHEET_REDIS_URL: redis://redis:6379/0
+      COMMIT_SHA: ${COMMIT_SHA:-unknown}
     volumes:
       - blob-data:/app/blob
     depends_on:
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/v1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   worker-ingest:
     build: .
