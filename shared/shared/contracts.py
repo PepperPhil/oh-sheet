@@ -12,7 +12,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-SCHEMA_VERSION = "3.0.0"
+SCHEMA_VERSION = "3.1.0"
 
 
 # ---------------------------------------------------------------------------
@@ -219,11 +219,26 @@ class ScoreChordEvent(BaseModel):
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
 
 
+class Repeat(BaseModel):
+    """Repeat bracket in the score.
+
+    ``simple`` — a plain ``|: ... :|`` repeat with no volta brackets.
+    ``with_endings`` — a repeated section with 1st/2nd-ending brackets.
+    Populated by the refine stage; consumed by engrave.
+    """
+    start_beat: float
+    end_beat: float
+    kind: Literal["simple", "with_endings"]
+
+
 class ScoreSection(BaseModel):
     start_beat: float
     end_beat: float
     label: SectionLabel
     phrase_boundaries: list[float] = Field(default_factory=list)
+    # Free-form label set by refine stage. Falls back to ``label`` when
+    # absent. Engrave renders whichever is present.
+    custom_label: str | None = None
 
 
 class ScoreMetadata(BaseModel):
@@ -233,6 +248,14 @@ class ScoreMetadata(BaseModel):
     difficulty: Difficulty
     sections: list[ScoreSection] = Field(default_factory=list)
     chord_symbols: list[ScoreChordEvent] = Field(default_factory=list)
+    # Populated by the refine stage. All optional so upstream producers
+    # that don't know about refine can still build valid ScoreMetadata.
+    title: str | None = None
+    composer: str | None = None
+    arranger: str | None = None
+    tempo_marking: str | None = None        # e.g., "Andante"
+    staff_split_hint: int | None = None     # MIDI pitch; engrave default ~60
+    repeats: list[Repeat] = Field(default_factory=list)
 
 
 class PianoScore(BaseModel):
