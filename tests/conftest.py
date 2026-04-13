@@ -74,37 +74,6 @@ def celery_eager_mode():
 
 
 @pytest.fixture(autouse=True)
-def default_enable_refine_false(monkeypatch):
-    """Until the refine worker lands (Task 6), default enable_refine=False in tests
-    so full-pipeline tests don't try to dispatch a nonexistent task.
-
-    Pydantic v2 bakes field defaults into the compiled core schema, so mutating
-    model_fields[...].default has no effect at runtime.  Wrapping __init__ is the
-    reliable way to intercept unset keyword arguments before Pydantic's validator
-    runs.  Tests that explicitly pass enable_refine=True are unaffected.
-    """
-    from shared.contracts import PipelineConfig
-
-    original_init = PipelineConfig.__init__
-
-    def _patched_init(self, **kwargs):
-        if "enable_refine" not in kwargs:
-            kwargs["enable_refine"] = False
-        original_init(self, **kwargs)
-
-    monkeypatch.setattr(PipelineConfig, "__init__", _patched_init)
-    yield
-
-
-@pytest.fixture(autouse=True)
-def disable_refine_in_settings(monkeypatch):
-    """Until Task 6 lands the refine worker, keep settings.refine_enabled=False
-    in tests so jobs.py's PipelineConfig construction doesn't enable refine."""
-    from backend.config import settings
-    monkeypatch.setattr(settings, "refine_enabled", False)
-
-
-@pytest.fixture(autouse=True)
 def disable_real_refine_llm(monkeypatch):
     """Null out the Anthropic API key for every test.
 

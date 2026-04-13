@@ -43,6 +43,8 @@ log = logging.getLogger(__name__)
 
 _VALID_SECTION_LABELS = {e.value for e in SectionLabel}
 _VALID_REPEAT_KINDS = {"simple", "with_endings"}
+_MAX_BEATS = 1_000_000
+_VALID_TS_DENOMINATORS = {1, 2, 4, 8, 16, 32}
 
 
 class RefineService:
@@ -269,9 +271,11 @@ class RefineService:
             ts = refinements["time_signature"]
             if isinstance(ts, (list, tuple)) and len(ts) == 2:
                 try:
-                    update["time_signature"] = (int(ts[0]), int(ts[1]))
+                    num, den = int(ts[0]), int(ts[1])
                 except (TypeError, ValueError):
-                    pass
+                    num = den = 0
+                if 1 <= num <= 32 and den in _VALID_TS_DENOMINATORS:
+                    update["time_signature"] = (num, den)
         if "tempo_bpm" in refinements and md.tempo_map:
             try:
                 new_bpm = float(refinements["tempo_bpm"])
@@ -307,6 +311,8 @@ def _parse_sections(items: Any) -> list[ScoreSection]:
             end = float(it["end_beat"])
         except (KeyError, TypeError, ValueError):
             continue
+        if not (0 <= start < end <= _MAX_BEATS):
+            continue
         label_raw = str(it.get("label", "other")).lower()
         label = SectionLabel(label_raw) if label_raw in _VALID_SECTION_LABELS else SectionLabel.OTHER
         custom = it.get("custom_label")
@@ -335,13 +341,15 @@ def _parse_repeats(items: Any) -> list[Repeat]:
             end = float(it["end_beat"])
         except (KeyError, TypeError, ValueError):
             continue
+        if not (0 <= start < end <= _MAX_BEATS):
+            continue
         out.append(Repeat(start_beat=start, end_beat=end, kind=kind))  # type: ignore[arg-type]
     return out
 
 
 def _is_transient(exc: BaseException) -> bool:
     msg = str(exc).lower()
-    if "timeout" in msg or "overloaded" in msg or "rate limit" in msg:
+    if any(s in msg for s in ("timeout", "overloaded", "rate limit", "connection")):
         return True
     status = getattr(exc, "status_code", None)
     try:

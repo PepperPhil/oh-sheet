@@ -269,3 +269,65 @@ async def test_null_string_fields_are_skipped_not_stringified(blob):
     assert md.composer is None
     assert md.arranger is None
     assert md.tempo_marking is None
+
+
+@pytest.mark.asyncio
+async def test_invalid_section_beats_are_dropped(blob):
+    refinements = {
+        "sections": [
+            {"start_beat": -4.0, "end_beat": 4.0, "label": "intro"},       # negative start
+            {"start_beat": 8.0, "end_beat": 4.0, "label": "verse"},         # end <= start
+            {"start_beat": 4.0, "end_beat": 1e10, "label": "chorus"},       # end too large
+            {"start_beat": 0.0, "end_beat": 8.0, "label": "bridge"},        # valid
+        ],
+    }
+    fake = _FakeAnthropic([
+        _FakeResponse([_FakeToolUseBlock("submit_refinements", refinements)]),
+    ])
+    svc = RefineService(blob_store=blob, client=fake)
+    result = await svc.run(_score(), title_hint=None, artist_hint=None)
+    assert [s.label.value for s in result.metadata.sections] == ["bridge"]
+
+
+@pytest.mark.asyncio
+async def test_invalid_repeat_beats_are_dropped(blob):
+    refinements = {
+        "repeats": [
+            {"start_beat": -1.0, "end_beat": 8.0, "kind": "simple"},         # negative
+            {"start_beat": 8.0, "end_beat": 4.0, "kind": "simple"},          # inverted
+            {"start_beat": 0.0, "end_beat": 16.0, "kind": "simple"},         # valid
+        ],
+    }
+    fake = _FakeAnthropic([
+        _FakeResponse([_FakeToolUseBlock("submit_refinements", refinements)]),
+    ])
+    svc = RefineService(blob_store=blob, client=fake)
+    result = await svc.run(_score(), title_hint=None, artist_hint=None)
+    assert len(result.metadata.repeats) == 1
+    assert result.metadata.repeats[0].start_beat == 0.0
+
+
+@pytest.mark.asyncio
+async def test_invalid_time_signature_is_ignored(blob):
+    for bad in [[0, 4], [3, 7], [-1, 4], [33, 4], [4, 3]]:
+        fake = _FakeAnthropic([
+            _FakeResponse([_FakeToolUseBlock("submit_refinements", {"time_signature": bad})]),
+        ])
+        svc = RefineService(blob_store=blob, client=fake)
+        result = await svc.run(_score(), title_hint=None, artist_hint=None)
+        # Unchanged from the input (4, 4).
+        assert result.metadata.time_signature == (4, 4), f"bad input {bad} leaked through"
+
+
+@pytest.mark.asyncio
+async def test_connection_error_is_transient_and_retried(blob):
+    """Transient APIConnectionError-like errors should trigger the retry loop."""
+    refinements = {"title": "After retry"}
+    fake = _FakeAnthropic([
+        RuntimeError("Connection error"),
+        _FakeResponse([_FakeToolUseBlock("submit_refinements", refinements)]),
+    ])
+    svc = RefineService(blob_store=blob, client=fake)
+    result = await svc.run(_score(), title_hint=None, artist_hint=None)
+    assert result.metadata.title == "After retry"
+    assert len(fake.messages.calls) == 2
