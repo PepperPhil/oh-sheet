@@ -451,6 +451,232 @@ def test_l2_rh_only_fixture_still_single_part(engraved_artifacts):
     assert staves and max(staves) == 2
 
 
+def test_l2_bar_crossing_note_in_voice_is_split_with_tie():
+    """A voice-2 note that crosses a bar line must be split into two
+    tied notes — never emitted as a single over-long duration that
+    overflows its starting measure.
+
+    MuseScore 4 renders a "Score corrupted" banner for any MusicXML
+    measure whose voice durations sum to more than the time signature
+    allows. Before the fix, engrave's explicit-``Voice`` path relied on
+    ``part.makeNotation(inPlace=True)`` to split bar-crossing notes via
+    ``makeTies`` — but music21's ``makeTies`` does not reliably descend
+    into ``Voice`` sub-streams, so voice-2 notes straddling a barline
+    got written verbatim into their starting measure with an oversized
+    ``<duration>``.
+    """
+    import xml.etree.ElementTree as etree
+
+    from backend.contracts import (
+        PianoScore,
+        ScoreMetadata,
+        ScoreNote,
+        TempoMapEntry,
+    )
+    from backend.services.engrave import _engrave_sync
+
+    # Reproduces the production failure (job 9334f0368dfe, measure 10):
+    # LH voice 1 contains two same-pitch B3 notes that overlap at a
+    # measure boundary:
+    #   * a 4-beat note ending at m2 beat 0.5 (tied tail from m1),
+    #   * an eighth at m2 beat 0 (attacks during that tied tail),
+    #   * another 4-beat note at m2 beat 0.5 (crosses into m3).
+    # When the same pitch attacks at the same beat as a tied
+    # continuation in a ``Voice`` sub-stream, music21's ``makeTies``
+    # can't split the bar-crossing note cleanly — m2 voice 1 ends up
+    # with 6+6+42 = 54 divisions instead of 48. MuseScore flags the
+    # overflow as a "corrupted score".
+    rh = [
+        ScoreNote(id=f"rh-{i}", pitch=72, onset_beat=float(i), duration_beat=1.0, velocity=80, voice=1)
+        for i in range(12)  # 3 measures of quarters
+    ]
+    lh = [
+        # M1 LH v1: eighth at beat 0, then 4-beat note at beat 0.5
+        # (crosses into M2 by 0.5 beats).
+        ScoreNote(id="lh-m1-v1a", pitch=59, onset_beat=0.0, duration_beat=0.5, velocity=64, voice=1),
+        ScoreNote(id="lh-m1-v1b", pitch=59, onset_beat=0.5, duration_beat=4.0, velocity=77, voice=1),
+        # M1 LH v2 whole note — forces use_explicit_voices=True.
+        ScoreNote(id="lh-m1-v2", pitch=55, onset_beat=0.0, duration_beat=4.0, velocity=70, voice=2),
+        # M2 LH v1: ANOTHER eighth at beat 4 (onset=4, dur=0.5) that
+        # overlaps with the tied tail of lh-m1-v1b, then another
+        # 4-beat note crossing into M3.
+        ScoreNote(id="lh-m2-v1a", pitch=59, onset_beat=4.0, duration_beat=0.5, velocity=64, voice=1),
+        ScoreNote(id="lh-m2-v1b", pitch=59, onset_beat=4.5, duration_beat=4.0, velocity=77, voice=1),
+        ScoreNote(id="lh-m2-v2", pitch=48, onset_beat=4.0, duration_beat=4.0, velocity=70, voice=2),
+        # M3 padding so the tied tail has somewhere to land.
+        ScoreNote(id="lh-m3-v1", pitch=55, onset_beat=8.5, duration_beat=3.5, velocity=70, voice=1),
+        ScoreNote(id="lh-m3-v2", pitch=48, onset_beat=8.0, duration_beat=4.0, velocity=70, voice=2),
+    ]
+
+    score = PianoScore(
+        metadata=ScoreMetadata(
+            key="C:major",
+            time_signature=(4, 4),
+            tempo_map=[TempoMapEntry(time_sec=0.0, beat=0.0, bpm=120.0)],
+            difficulty="intermediate",
+            sections=[],
+            chord_symbols=[],
+        ),
+        right_hand=rh,
+        left_hand=lh,
+    )
+
+    _pdf, musicxml, _midi, _chord_count = _engrave_sync(
+        score, title="bar_crossing", composer="test",
+    )
+
+    root = etree.fromstring(musicxml)
+    parts = root.findall("part")
+    assert len(parts) == 1, "engrave should emit a single grand-staff <part>"
+
+    # Pull the divisions + time signature from the first measure's
+    # <attributes> block so this test stays honest if we change defaults.
+    first_attrs = parts[0].find("measure/attributes")
+    divisions = int(first_attrs.findtext("divisions"))
+    beats = int(first_attrs.find("time").findtext("beats"))
+    beat_type = int(first_attrs.find("time").findtext("beat-type"))
+    expected_per_measure = divisions * 4 * beats // beat_type
+
+    overflows: list[tuple[str, int, int]] = []
+    for measure in parts[0].findall("measure"):
+        # Walk the measure top-to-bottom tracking a per-voice cursor.
+        # Each voice's duration in the measure is the max cursor it
+        # reaches before the terminating ``<backup>`` (or end-of-measure).
+        voice_max: dict[str, int] = {}
+        cursor_by_voice: dict[str, int] = {}
+        current_voice = "1"
+        for el in measure:
+            if el.tag == "note":
+                v_el = el.find("voice")
+                voice = v_el.text if v_el is not None else current_voice
+                current_voice = voice
+                is_chord = el.find("chord") is not None
+                dur = int(el.findtext("duration") or 0)
+                if not is_chord:
+                    cursor_by_voice[voice] = cursor_by_voice.get(voice, 0) + dur
+                voice_max[voice] = max(voice_max.get(voice, 0), cursor_by_voice.get(voice, 0))
+            elif el.tag == "backup":
+                dur = int(el.findtext("duration") or 0)
+                cursor_by_voice[current_voice] = max(0, cursor_by_voice.get(current_voice, 0) - dur)
+            elif el.tag == "forward":
+                dur = int(el.findtext("duration") or 0)
+                cursor_by_voice[current_voice] = cursor_by_voice.get(current_voice, 0) + dur
+                voice_max[current_voice] = max(
+                    voice_max.get(current_voice, 0), cursor_by_voice[current_voice]
+                )
+
+        for voice, filled in voice_max.items():
+            if filled > expected_per_measure:
+                overflows.append((measure.get("number"), voice, filled))
+
+    assert not overflows, (
+        f"voice duration overflow(s) — MuseScore will flag this as a corrupt "
+        f"score. expected ≤ {expected_per_measure} divisions per voice per "
+        f"measure, got: {overflows}"
+    )
+
+
+def test_l2_ties_do_not_cross_voices():
+    """A tie pair (``type="start"`` / ``type="stop"``) must stay in the
+    same (pitch, voice, staff). When music21's ``makeTies`` writes the
+    continuation of a bar-crossing note on a DIFFERENT voice in the
+    next measure, the sanitizer's voice-clamp can merge it into a
+    voice that has no matching start — leaving an orphan tie that
+    MuseScore 4 flags as a corrupt score.
+
+    This reproduces the second failure mode from job 9334f0368dfe:
+    a LH voice-1 note that crosses into a measure whose only other
+    LH content is in voice 2 (forcing ``use_explicit_voices=True``)
+    ends up with its tie continuation renumbered and the sanitizer
+    turns the resulting voice mismatch into a corrupt tie chain.
+    """
+    import xml.etree.ElementTree as etree
+
+    from backend.contracts import (
+        PianoScore,
+        ScoreMetadata,
+        ScoreNote,
+        TempoMapEntry,
+    )
+    from backend.services.engrave import _engrave_sync
+
+    # Both hands need 2 voices with sparse voice-2 content — that's
+    # the pattern that makes music21 assign a fresh voice number to
+    # the LH bar-crossing continuation in the next measure. The
+    # sanitizer then clamps that fresh number back into voice 2, which
+    # on the NEXT measure doesn't match voice 1 where the tie started.
+    rh = [
+        ScoreNote(id=f"rh-v1-{i}", pitch=72, onset_beat=float(i), duration_beat=1.0, velocity=80, voice=1)
+        for i in range(12)
+    ]
+    # RH voice 2 appears only in M1 and M3 — sparse.
+    rh.append(ScoreNote(id="rh-v2-m1", pitch=67, onset_beat=3.5, duration_beat=0.25, velocity=70, voice=2))
+    rh.append(ScoreNote(id="rh-v2-m3", pitch=67, onset_beat=9.5, duration_beat=0.25, velocity=70, voice=2))
+    lh = [
+        # M1 LH v1: eighth + 4-beat note crossing into M2 by 0.5 beats.
+        ScoreNote(id="lh-m1-v1a", pitch=59, onset_beat=0.0, duration_beat=0.5, velocity=64, voice=1),
+        ScoreNote(id="lh-m1-v1b", pitch=59, onset_beat=0.5, duration_beat=4.0, velocity=77, voice=1),
+        # M1 LH v2: F3 whole note forces explicit voices on LH.
+        ScoreNote(id="lh-m1-v2", pitch=53, onset_beat=0.0, duration_beat=4.0, velocity=70, voice=2),
+        # M2 LH v1: only a single G#3 at beat 0.5 — no voice 2 in M2 LH.
+        ScoreNote(id="lh-m2-v1a", pitch=56, onset_beat=4.5, duration_beat=1.0, velocity=70, voice=1),
+        # M3 LH v1+v2 so the LH has voice 2 content elsewhere.
+        ScoreNote(id="lh-m3-v1", pitch=55, onset_beat=8.0, duration_beat=4.0, velocity=70, voice=1),
+        ScoreNote(id="lh-m3-v2", pitch=48, onset_beat=8.0, duration_beat=4.0, velocity=70, voice=2),
+    ]
+    score = PianoScore(
+        metadata=ScoreMetadata(
+            key="C:major",
+            time_signature=(4, 4),
+            tempo_map=[TempoMapEntry(time_sec=0.0, beat=0.0, bpm=120.0)],
+            difficulty="intermediate",
+            sections=[],
+            chord_symbols=[],
+        ),
+        right_hand=rh,
+        left_hand=lh,
+    )
+    _pdf, musicxml, _midi, _chord_count = _engrave_sync(
+        score, title="t", composer="c",
+    )
+
+    root = etree.fromstring(musicxml)
+    # Walk every tie and confirm each (pitch, voice, staff) start has
+    # a matching stop — no orphans, no doubles, no unclosed chains.
+    open_ties: dict[tuple, str] = {}
+    issues: list[tuple[str, str, tuple]] = []
+    for measure in root.find("part").findall("measure"):
+        mnum = measure.get("number")
+        for n in measure.findall("note"):
+            pitch = n.find("pitch")
+            if pitch is None:
+                continue
+            key = (
+                pitch.findtext("step"),
+                pitch.findtext("octave"),
+                pitch.findtext("alter") or "0",
+                n.findtext("voice") or "1",
+                n.findtext("staff") or "1",
+            )
+            for tie in n.findall("tie"):
+                typ = tie.get("type")
+                if typ == "start":
+                    if key in open_ties:
+                        issues.append(("double-start", mnum, key))
+                    open_ties[key] = mnum
+                elif typ == "stop":
+                    if key not in open_ties:
+                        issues.append(("orphan-stop", mnum, key))
+                    else:
+                        del open_ties[key]
+    for key, mnum in open_ties.items():
+        issues.append(("unclosed-start", mnum, key))
+
+    assert not issues, (
+        f"tie chain issues — MuseScore will flag this as corrupt: {issues}"
+    )
+
+
 def test_engrave_does_not_leak_music21_defaults():
     """``music21.defaults.divisionsPerQuarter`` must be restored after engrave.
 

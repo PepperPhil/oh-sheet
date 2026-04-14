@@ -23,6 +23,7 @@ from backend.contracts import (
     EngravedScoreData,
     HumanizedPerformance,
     PianoScore,
+    ScoreNote,
     beat_to_sec,
 )
 from backend.storage.base import BlobStore
@@ -461,6 +462,91 @@ def _coerce_durations_for_musicxml_export(part, music21) -> None:  # noqa: ANN00
             ql_orig,
             min_safe_ql,
         )
+def _resolve_same_pitch_overlaps_per_voice(notes: list[ScoreNote]) -> list[ScoreNote]:
+    """Truncate an earlier same-(pitch, voice) note when a later one
+    attacks before it ends.
+
+    Mirrors the overlap resolver in ``_render_midi_bytes`` for the
+    MusicXML path. When two notes of the same pitch in the same voice
+    overlap AND the earlier one crosses a bar line, music21's
+    ``makeTies`` can't reliably split the bar-crossing portion inside
+    a ``Voice`` sub-stream — the note lands verbatim in its starting
+    measure and pushes the total voice duration past the time
+    signature's budget. MuseScore flags that overflow as "corrupted
+    score".
+
+    Fixing it upstream (shorten the earlier note to end at the next
+    attack) keeps music21 seeing a clean, sequential voice line.
+    Preserves a 0.01-beat floor so no note collapses to zero.
+    """
+    by_key: dict[tuple[int, int], list[int]] = {}
+    for i, n in enumerate(notes):
+        by_key.setdefault((n.pitch, n.voice), []).append(i)
+    new_durations: dict[int, float] = {}
+    for idxs in by_key.values():
+        if len(idxs) < 2:
+            continue
+        idxs.sort(key=lambda i: notes[i].onset_beat)
+        for j in range(len(idxs) - 1):
+            prev = notes[idxs[j]]
+            nxt = notes[idxs[j + 1]]
+            if prev.onset_beat + prev.duration_beat > nxt.onset_beat:
+                new_durations[idxs[j]] = max(0.01, nxt.onset_beat - prev.onset_beat)
+    if not new_durations:
+        return notes
+    return [
+        n.model_copy(update={"duration_beat": new_durations[i]}) if i in new_durations else n
+        for i, n in enumerate(notes)
+    ]
+
+
+def _split_bar_crossing_notes(
+    notes: list[ScoreNote],
+    beats_per_measure: float,
+) -> list[tuple[ScoreNote, bool, bool]]:
+    """Split notes that cross bar lines into consecutive in-measure pieces.
+
+    Returns a list of ``(piece, tie_in, tie_out)`` tuples — ``tie_in``
+    means the piece is a continuation of an earlier piece, ``tie_out``
+    means the piece will be continued by a later piece. The piece is a
+    ScoreNote copy whose ``onset_beat``/``duration_beat`` lie entirely
+    within one measure.
+
+    Why pre-split: music21's ``makeTies`` is the alternative, but when
+    the score has 2 voices per hand with sparse voice-2 content,
+    music21 assigns a bar-crossing note's continuation a fresh voice
+    number in the next measure. The OSMD sanitizer then clamps that
+    fresh number back to voice 2, breaking the tie chain (start on
+    voice 1, stop on voice 2). MuseScore 4 flags the dangling ties as
+    a corrupt score.
+
+    Pre-splitting keeps each piece entirely within one measure so
+    music21 never renumbers during a split — voices stay stable and
+    the tie marks we set here round-trip cleanly through export.
+    """
+    if beats_per_measure <= 0:
+        return [(n, False, False) for n in notes]
+    out: list[tuple[ScoreNote, bool, bool]] = []
+    for n in notes:
+        remaining = n.duration_beat
+        cur_onset = n.onset_beat
+        prev_piece_tied_out = False
+        while remaining > 1e-6:
+            bar_index = int(cur_onset / beats_per_measure + 1e-9)
+            bar_end = (bar_index + 1) * beats_per_measure
+            piece_dur = min(remaining, bar_end - cur_onset)
+            if piece_dur < 1e-6:
+                break
+            tie_out = remaining - piece_dur > 1e-6
+            piece = n.model_copy(update={
+                "onset_beat": cur_onset,
+                "duration_beat": piece_dur,
+            })
+            out.append((piece, prev_piece_tied_out, tie_out))
+            prev_piece_tied_out = tie_out
+            cur_onset += piece_dur
+            remaining -= piece_dur
+    return out
 
 
 def _render_musicxml_bytes(
@@ -491,9 +577,11 @@ def _render_musicxml_bytes(
     s.metadata.title = title or "Untitled"
     s.metadata.composer = composer or ""
 
-    ts = music21.meter.TimeSignature(
-        f"{score.metadata.time_signature[0]}/{score.metadata.time_signature[1]}"
-    )
+    ts_num, ts_den = score.metadata.time_signature
+    ts = music21.meter.TimeSignature(f"{ts_num}/{ts_den}")
+    # beats_per_measure in quarter-note units (music21's internal clock).
+    # For 4/4 this is 4; for 3/8 it's 1.5 (three eighth-notes = 1.5 quarters).
+    beats_per_measure = ts_num * 4.0 / ts_den
     # Verify the declared key against a KS pitch-histogram analysis
     # before trusting it. Audio transcription can mis-label a piece and
     # every accidental downstream turns into a sharp/flat explosion.
@@ -548,8 +636,24 @@ def _render_musicxml_bytes(
         max_voice_in_hand = max((sn.voice for sn in notes), default=1)
         use_explicit_voices = 1 < max_voice_in_hand <= 2
 
+        # Resolve same-(pitch, voice) overlaps before music21 sees the
+        # notes. An overlapping same-pitch attack near a bar line defeats
+        # ``makeTies`` inside a ``Voice`` sub-stream, producing a measure
+        # whose voice duration exceeds the time signature — MuseScore 4
+        # renders that as a "Score corrupted" banner.
+        notes = _resolve_same_pitch_overlaps_per_voice(notes)
+
+        # Pre-split bar-crossing notes into tied in-measure pieces so
+        # music21 never needs to split during ``makeTies``. Splitting
+        # inside ``makeTies`` can reassign the continuation to a fresh
+        # voice number in the next measure, which the OSMD sanitizer
+        # then clamps back and the tie chain ends up spanning two
+        # different voice tags — MuseScore 4 reports that as a corrupt
+        # score (dangling ties).
+        split = _split_bar_crossing_notes(notes, float(beats_per_measure))
+
         notes_by_voice: dict[int, list] = {}
-        for sn in sorted(notes, key=lambda n: n.onset_beat):
+        for sn, tie_in, tie_out in sorted(split, key=lambda row: row[0].onset_beat):
             n = music21.note.Note(sn.pitch)
             n.quarterLength = sn.duration_beat
             n.volume.velocity = sn.velocity
@@ -566,6 +670,12 @@ def _render_musicxml_bytes(
                 # inside <notations> either way, but only the
                 # expressions placement round-trips through makeNotation.
                 n.expressions.append(music21.expressions.Fermata())
+            if tie_in and tie_out:
+                n.tie = music21.tie.Tie("continue")
+            elif tie_in:
+                n.tie = music21.tie.Tie("stop")
+            elif tie_out:
+                n.tie = music21.tie.Tie("start")
             voice_num = sn.voice if use_explicit_voices else 1
             notes_by_voice.setdefault(voice_num, []).append((sn.onset_beat, n))
 
@@ -693,10 +803,9 @@ def _render_musicxml_bytes(
 
 
 def _sanitize_musicxml_for_osmd(raw: bytes) -> bytes:
-    """Post-process music21 MusicXML to fix OSMD compatibility issues.
+    """Post-process music21 MusicXML to fix OSMD + MuseScore issues.
 
-    Two mechanical fixups remain after PR-9 (source-level ``divisions=12``)
-    and PR-10 (Voice sub-streams for 2-voice preservation):
+    Three mechanical fixups after music21 export:
 
     1. ``<voice>0</voice>`` → ``<voice>1</voice>`` — music21 emits 0 when
        a note isn't wrapped in a ``Voice`` sub-stream and the part has
@@ -707,19 +816,140 @@ def _sanitize_musicxml_for_osmd(raw: bytes) -> bytes:
        produces more than two voices per hand. OSMD's VexFlow backend
        crashes (``parentVoiceEntry undefined``) on 3+ voices per part;
        clamping to 2 is the minimum-damage fallback.
+    3. Tie-chain voice alignment — music21 can reassign a bar-crossing
+       note's tie continuation to a different voice in the next
+       measure (see ``_split_bar_crossing_notes`` for the upstream
+       attempt). MuseScore 4 flags mismatched tie-start / tie-stop
+       voices as a corrupt score. Walk the XML, track open ties by
+       (pitch, staff), and rewrite the tie-stop's ``<voice>`` to match
+       the tie-start's voice. The voice reassignment only affects the
+       single tied note; surrounding voice content keeps its tags.
     """
     text = raw.decode("utf-8")
 
-    def _clamp(match: re.Match[str]) -> str:
-        n = int(match.group(1))
-        if n == 0:
-            return "<voice>1</voice>"
-        if n > 2:
-            return "<voice>2</voice>"
-        return match.group(0)
+    # MusicXML voice=0 is invalid and OSMD rejects it outright.
+    text = re.sub(r"<voice>0</voice>", "<voice>1</voice>", text)
+    remapped = _remap_voices_per_staff(text.encode("utf-8"))
+    return _align_tie_chain_voices(remapped)
 
-    text = re.sub(r"<voice>(\d+)</voice>", _clamp, text)
-    return text.encode("utf-8")
+
+def _remap_voices_per_staff(raw: bytes) -> bytes:
+    """Renumber voice tags per staff so each staff uses ``{1, 2}``.
+
+    music21's exporter numbers voices globally within a ``<part>``
+    — a grand staff with two voices per hand gets voices ``{1..4}``.
+    OSMD's VexFlow backend crashes on ``voice ≥ 3``, so the old
+    sanitizer clamped every ``voice>=3`` to ``voice=2``. That merged
+    distinct musical lines into one voice, which MuseScore 4 reports
+    as "Score corrupted" when the merged voice's duration adds up
+    past the time signature.
+
+    Correct fix: remap per staff. Collect the set of voice numbers
+    actually used on each staff and compress them to ``1..N``. Staves
+    independently get ``voice=1`` and ``voice=2`` — MusicXML voices
+    are part-scoped per the spec, but both MuseScore and OSMD treat
+    them per-staff, so this is the renderer-pleasing compromise.
+    """
+    import xml.etree.ElementTree as ET  # noqa: PLC0415
+
+    root = ET.fromstring(raw)
+
+    for part in root.findall("part"):
+        for measure in part.findall("measure"):
+            # Collect the voices used on each staff in this measure.
+            voices_by_staff: dict[str, list[str]] = {}
+            cur_staff = "1"
+            for note in measure.findall("note"):
+                staff_el = note.find("staff")
+                staff = staff_el.text if staff_el is not None else cur_staff
+                cur_staff = staff
+                voice_el = note.find("voice")
+                if voice_el is None:
+                    continue
+                v = voice_el.text or "1"
+                slot = voices_by_staff.setdefault(staff, [])
+                if v not in slot:
+                    slot.append(v)
+
+            # Build the per-staff remap: first seen voice → "1", second
+            # → "2", and clamp everything beyond that to "2" (OSMD
+            # can't handle 3 voices on one staff anyway).
+            remap: dict[tuple[str, str], str] = {}
+            for staff, vs in voices_by_staff.items():
+                for idx, v in enumerate(vs):
+                    remap[(staff, v)] = str(min(idx + 1, 2))
+
+            # Apply the remap.
+            cur_staff = "1"
+            for note in measure.findall("note"):
+                staff_el = note.find("staff")
+                staff = staff_el.text if staff_el is not None else cur_staff
+                cur_staff = staff
+                voice_el = note.find("voice")
+                if voice_el is None:
+                    continue
+                v = voice_el.text or "1"
+                new_v = remap.get((staff, v))
+                if new_v is not None and new_v != v:
+                    voice_el.text = new_v
+
+    prefix_end = raw.find(b"<score-partwise")
+    prefix = raw[:prefix_end] if prefix_end > 0 else b""
+    body = ET.tostring(root, encoding="utf-8", xml_declaration=False)
+    return prefix + body
+
+
+def _align_tie_chain_voices(raw: bytes) -> bytes:
+    """Rewrite tie-stop / tie-continue notes to match the voice of the
+    preceding tie-start for the same (pitch, staff).
+
+    music21 sometimes assigns a bar-crossing note's continuation to a
+    different voice in the next measure. After the voice-clamp step
+    this shows up as tie-start on voice 1, tie-stop on voice 2 — which
+    MuseScore 4 reports as a dangling tie corruption. We walk the XML
+    in document order, track open ties by ``(step, octave, alter,
+    staff)``, and when we see a note that closes an open tie, rewrite
+    its ``<voice>`` tag to match the start.
+    """
+    import xml.etree.ElementTree as ET  # noqa: PLC0415 — only needed on this path
+
+    parser = ET.XMLParser()
+    root = ET.fromstring(raw, parser=parser)
+
+    open_ties: dict[tuple[str, str, str, str], str] = {}
+    rewrites = 0
+    for part in root.findall("part"):
+        for measure in part.findall("measure"):
+            for note in measure.findall("note"):
+                pitch = note.find("pitch")
+                if pitch is None:
+                    continue
+                key = (
+                    pitch.findtext("step") or "",
+                    pitch.findtext("octave") or "",
+                    pitch.findtext("alter") or "0",
+                    note.findtext("staff") or "1",
+                )
+                voice_el = note.find("voice")
+                voice = voice_el.text if voice_el is not None else "1"
+                for tie in note.findall("tie"):
+                    typ = tie.get("type")
+                    if typ == "start":
+                        open_ties[key] = voice
+                    elif typ == "stop":
+                        expected = open_ties.pop(key, None)
+                        if expected is not None and expected != voice and voice_el is not None:
+                            voice_el.text = expected
+                            rewrites += 1
+
+    if rewrites == 0:
+        return raw
+
+    # Preserve the original XML declaration + DOCTYPE that ElementTree drops.
+    prefix_end = raw.find(b"<score-partwise")
+    prefix = raw[:prefix_end] if prefix_end > 0 else b""
+    body = ET.tostring(root, encoding="utf-8", xml_declaration=False)
+    return prefix + body
 
 
 # ---------------------------------------------------------------------------
