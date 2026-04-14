@@ -4,8 +4,12 @@ from __future__ import annotations
 from backend.config import Settings
 
 
-def test_refine_defaults() -> None:
-    s = Settings()
+def test_refine_defaults(monkeypatch) -> None:
+    # Make the test deterministic regardless of the developer's local .env —
+    # BaseSettings auto-reads it, so a dev with a real key configured would
+    # see ``anthropic_api_key is None`` fail without ``_env_file=None``.
+    monkeypatch.delenv("OHSHEET_ANTHROPIC_API_KEY", raising=False)
+    s = Settings(_env_file=None)
     assert s.refine_enabled is True
     assert s.refine_model == "claude-sonnet-4-6"
     assert s.refine_max_searches == 5

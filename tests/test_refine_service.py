@@ -156,17 +156,41 @@ async def test_humanized_performance_roundtrip(blob):
 
 
 @pytest.mark.asyncio
-async def test_llm_failure_passes_input_through_with_warning(blob):
+async def test_non_transient_error_aborts_immediately_with_warning(blob):
+    # ValueError is clearly not a network/overload failure, so it must NOT
+    # match ``_is_transient`` and must not trigger the retry loop. Using
+    # a non-transient error name keeps the test stable against future edits
+    # to the transience substring list.
     fake = _FakeAnthropic([
-        RuntimeError("network melted"),
+        ValueError("bad payload"),
     ])
     svc = RefineService(blob_store=blob, client=fake)
     perf = _humanized(_score())
     result = await svc.run(perf, title_hint=None, artist_hint=None)
     assert isinstance(result, HumanizedPerformance)
-    # Notes unchanged
     assert result.score.metadata.title is None
-    # Warning attached
+    assert any("refine" in w for w in result.quality.warnings)
+    # Exactly one attempt — no retry on non-transient errors.
+    assert len(fake.messages.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_transient_error_exhausts_retries_then_falls_back(blob, monkeypatch):
+    # Three transient errors exhaust the retry budget; the service must
+    # fall through to the warning path without raising into the pipeline.
+    async def _no_sleep(_delay: float) -> None:  # pragma: no cover — monkeypatch
+        return None
+    monkeypatch.setattr("backend.services.refine.asyncio.sleep", _no_sleep)
+    fake = _FakeAnthropic([
+        RuntimeError("Connection error 1"),
+        RuntimeError("Connection error 2"),
+        RuntimeError("Connection error 3"),
+    ])
+    svc = RefineService(blob_store=blob, client=fake)
+    perf = _humanized(_score())
+    result = await svc.run(perf, title_hint=None, artist_hint=None)
+    assert isinstance(result, HumanizedPerformance)
+    assert len(fake.messages.calls) == 3
     assert any("refine" in w for w in result.quality.warnings)
 
 
