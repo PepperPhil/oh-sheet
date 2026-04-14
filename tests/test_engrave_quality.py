@@ -1363,3 +1363,156 @@ def test_l2_engraved_flags_reflect_rendered_content(engraved_artifacts):
         )
         assert out.metadata.includes_dynamics is True
         assert out.metadata.includes_pedal_marks is True
+
+
+# ---------------------------------------------------------------------------
+# Helper-level unit tests
+#
+# The three helpers below are private to engrave.py but they have subtle
+# edge cases (grid-floor interactions, float epsilon, degenerate inputs).
+# The end-to-end L1/L2 suites catch the common failure modes but don't
+# exercise these edges, so we pin them here.
+# ---------------------------------------------------------------------------
+
+
+from fractions import Fraction  # noqa: E402 — block-scoped for helper tests
+
+from shared.contracts import ScoreNote  # noqa: E402
+
+from backend.services.engrave import (  # noqa: E402
+    _MIN_SNAPPED_QL,
+    _resolve_same_pitch_overlaps_per_voice,
+    _snap_quarter,
+    _split_bar_crossing_notes,
+)
+
+
+def _sn(pitch: int, onset: float, dur: float, voice: int = 1, nid: str = "") -> ScoreNote:
+    return ScoreNote(
+        id=nid or f"n-{pitch}-{onset}",
+        pitch=pitch,
+        onset_beat=onset,
+        duration_beat=dur,
+        velocity=80,
+        voice=voice,
+    )
+
+
+# ---- _snap_quarter ---------------------------------------------------------
+
+def test_snap_quarter_triplet_eighth_snaps_to_one_sixth():
+    # Arrange's decimal approximation of 1/3 → exact Fraction(4, 12).
+    assert _snap_quarter(0.333333) == Fraction(4, 12)
+
+
+def test_snap_quarter_sixteenth_snaps_exactly():
+    # 16th note = 1/4 qL = Fraction(3, 12).
+    assert _snap_quarter(0.25) == Fraction(3, 12)
+
+
+def test_snap_quarter_sub_min_rounds_to_zero():
+    # Anything below half the grid rounds to 0; callers that need a
+    # positive minimum must clamp with _MIN_SNAPPED_QL themselves (as
+    # the _render_musicxml_bytes loop does at the ``dur = max(...)`` line).
+    assert _snap_quarter(0.01) == Fraction(0)
+
+
+def test_snap_quarter_preserves_exact_grid_values():
+    # Exact multiples of 1/12 round-trip identically.
+    assert _snap_quarter(1.0) == Fraction(12, 12) == Fraction(1)
+    assert _snap_quarter(Fraction(5, 12)) == Fraction(5, 12)
+
+
+# ---- _resolve_same_pitch_overlaps_per_voice --------------------------------
+
+def test_overlap_resolver_truncates_earlier_note_to_next_onset():
+    # Two C4s in voice 1 overlap: first is 2.0 beats starting at 0, second
+    # attacks at beat 1. Resolver must shorten the first to 1.0 beats.
+    notes = [_sn(60, 0.0, 2.0), _sn(60, 1.0, 1.0, nid="n-b")]
+    out = _resolve_same_pitch_overlaps_per_voice(notes)
+    assert out[0].duration_beat == 1.0
+    assert out[1].duration_beat == 1.0  # second note untouched
+
+
+def test_overlap_resolver_does_not_touch_different_voices():
+    # Same pitch, different voice — not an overlap in music21's model.
+    notes = [_sn(60, 0.0, 2.0, voice=1), _sn(60, 1.0, 1.0, voice=2, nid="n-b")]
+    out = _resolve_same_pitch_overlaps_per_voice(notes)
+    assert out[0].duration_beat == 2.0
+    assert out[1].duration_beat == 1.0
+
+
+def test_overlap_resolver_floor_matches_snap_grid():
+    # Second note attacks 0.03 beats after the first — below the 1/12
+    # snap grid. Pre-fix (0.01 floor) the resolver would have emitted
+    # dur=0.03, which _snap_quarter would round back up to 1/12≈0.083,
+    # re-crossing the second note's onset. With the floor aligned to
+    # _MIN_SNAPPED_QL, the resolver emits exactly the grid minimum.
+    notes = [_sn(60, 0.0, 1.0), _sn(60, 0.03, 1.0, nid="n-b")]
+    out = _resolve_same_pitch_overlaps_per_voice(notes)
+    assert out[0].duration_beat == pytest.approx(float(_MIN_SNAPPED_QL))
+
+
+def test_overlap_resolver_is_noop_when_no_overlap():
+    notes = [_sn(60, 0.0, 1.0), _sn(60, 2.0, 1.0, nid="n-b")]
+    out = _resolve_same_pitch_overlaps_per_voice(notes)
+    # Returns original list unchanged (identity, not a copy).
+    assert out is notes
+
+
+# ---- _split_bar_crossing_notes ---------------------------------------------
+
+def test_split_bar_crossing_into_tied_pieces():
+    # 3-beat note starting at beat 3 in 4/4 — spans into the next bar.
+    notes = [_sn(60, 3.0, 3.0)]
+    out = _split_bar_crossing_notes(notes, beats_per_measure=4.0)
+    assert len(out) == 2
+    first, second = out
+    # First piece: 1 beat in bar 1, ties OUT.
+    assert first[0].onset_beat == 3.0
+    assert first[0].duration_beat == pytest.approx(1.0)
+    assert (first[1], first[2]) == (False, True)
+    # Second piece: 2 beats in bar 2, ties IN (not OUT).
+    assert second[0].onset_beat == pytest.approx(4.0)
+    assert second[0].duration_beat == pytest.approx(2.0)
+    assert (second[1], second[2]) == (True, False)
+
+
+def test_split_bar_crossing_survives_epsilon_before_bar_line():
+    # Regression for silent data loss: a note starting ε before a bar line
+    # (cur_onset=3.9999999, beats_per_measure=4.0) would pre-fix break out
+    # of the while-loop with piece_dur ≈ 1e-7, abandoning the full note.
+    # Post-fix: cur_onset snaps forward to bar_end and the note emits
+    # a single clean piece on the next bar.
+    notes = [_sn(60, 3.9999999, 1.0)]
+    out = _split_bar_crossing_notes(notes, beats_per_measure=4.0)
+    assert len(out) >= 1
+    # Total emitted duration must roughly equal input duration — the
+    # rest of the note must not be silently dropped.
+    total = sum(p[0].duration_beat for p in out)
+    assert total == pytest.approx(1.0, abs=1e-3)
+
+
+def test_split_bar_crossing_clamps_zero_duration_notes():
+    # Pre-fix: the while-guard `remaining > 1e-6` dropped the note
+    # entirely. Post-fix: emit one minimum-grid piece with a warning.
+    notes = [_sn(60, 0.0, 0.0)]
+    out = _split_bar_crossing_notes(notes, beats_per_measure=4.0)
+    assert len(out) == 1
+    assert out[0][0].duration_beat == pytest.approx(float(_MIN_SNAPPED_QL))
+
+
+def test_split_bar_crossing_handles_three_eight_meter():
+    # 3/8 time — beats_per_measure=1.5. A 2.0-beat note starting at 1.0
+    # crosses a non-integer bar boundary. Verify both pieces land entirely
+    # within a measure and the tie chain is contiguous.
+    notes = [_sn(60, 1.0, 2.0)]
+    out = _split_bar_crossing_notes(notes, beats_per_measure=1.5)
+    assert len(out) == 2
+    (p1, ti1, to1), (p2, ti2, to2) = out
+    assert p1.onset_beat == pytest.approx(1.0)
+    assert p1.duration_beat == pytest.approx(0.5)  # fills remainder of bar 1
+    assert (ti1, to1) == (False, True)
+    assert p2.onset_beat == pytest.approx(1.5)
+    assert p2.duration_beat == pytest.approx(1.5)  # full second bar
+    assert (ti2, to2) == (True, False)
