@@ -499,12 +499,16 @@ def _resolve_same_pitch_overlaps_per_voice(notes: list[ScoreNote]) -> list[Score
 
     Fixing it upstream (shorten the earlier note to end at the next
     attack) keeps music21 seeing a clean, sequential voice line.
-    Preserves a 0.01-beat floor so no note collapses to zero.
+    Floor is ``_MIN_SNAPPED_QL`` (1/12 qL) — the smallest duration the
+    MusicXML exporter can reliably encode, matching ``_snap_quarter``'s
+    grid. Using 0.01 here produced overlaps that the later snap step
+    would re-stretch back above ``nxt.onset`` by rounding to 1/12.
     """
     by_key: dict[tuple[int, int], list[int]] = {}
     for i, n in enumerate(notes):
         by_key.setdefault((n.pitch, n.voice), []).append(i)
     new_durations: dict[int, float] = {}
+    min_dur = float(_MIN_SNAPPED_QL)
     for idxs in by_key.values():
         if len(idxs) < 2:
             continue
@@ -513,7 +517,7 @@ def _resolve_same_pitch_overlaps_per_voice(notes: list[ScoreNote]) -> list[Score
             prev = notes[idxs[j]]
             nxt = notes[idxs[j + 1]]
             if prev.onset_beat + prev.duration_beat > nxt.onset_beat:
-                new_durations[idxs[j]] = max(0.01, nxt.onset_beat - prev.onset_beat)
+                new_durations[idxs[j]] = max(min_dur, nxt.onset_beat - prev.onset_beat)
     if not new_durations:
         return notes
     return [
@@ -549,7 +553,19 @@ def _split_bar_crossing_notes(
     if beats_per_measure <= 0:
         return [(n, False, False) for n in notes]
     out: list[tuple[ScoreNote, bool, bool]] = []
+    min_dur = float(_MIN_SNAPPED_QL)
     for n in notes:
+        if n.duration_beat <= 0:
+            # Degenerate input (zero or negative) — emit a single minimum-
+            # grid piece so the note survives to MusicXML instead of being
+            # silently dropped by the ``while remaining > 1e-6`` guard.
+            log.warning(
+                "engrave: zero/negative duration for note pitch=%s onset=%s; "
+                "clamping to 1/12 qL",
+                n.pitch, n.onset_beat,
+            )
+            out.append((n.model_copy(update={"duration_beat": min_dur}), False, False))
+            continue
         remaining = n.duration_beat
         cur_onset = n.onset_beat
         prev_piece_tied_out = False
@@ -558,7 +574,13 @@ def _split_bar_crossing_notes(
             bar_end = (bar_index + 1) * beats_per_measure
             piece_dur = min(remaining, bar_end - cur_onset)
             if piece_dur < 1e-6:
-                break
+                # ``cur_onset`` is epsilon-before a bar line (float drift —
+                # e.g. 3.9999999 with beats_per_measure=4). Without this
+                # snap-forward, ``break`` would abandon the rest of the note
+                # and silently lose up to a full measure of playback. Jump
+                # to the next bar line and continue splitting.
+                cur_onset = bar_end
+                continue
             tie_out = remaining - piece_dur > 1e-6
             piece = n.model_copy(update={
                 "onset_beat": cur_onset,
@@ -826,7 +848,7 @@ def _render_musicxml_bytes(
         # deep-copies the score and runs ``makeNotation`` again on every part.
         # That second pass can emit tuplets MusicXML cannot encode (e.g. a
         # ``2048th`` normal-type) even after our per-part cleanup. We already
-        # called ``makeNotation`` on each ``PartStaff`` above — export the
+        # called ``makeNotation`` on each ``Part`` above — export the
         # score as-is. (Requires a well-formed ``Score``; see GeneralObjectExporter.)
         s.write("musicxml", fp=str(tmp_path), makeNotation=False)
         raw = tmp_path.read_bytes()
