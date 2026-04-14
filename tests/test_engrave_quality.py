@@ -489,6 +489,70 @@ def test_l2_rh_only_fixture_still_braced(engraved_artifacts):
     assert _count_part_notes(musicxml, 1) == 0
 
 
+def test_l2_bass_range_lh_renders_on_bass_clef_part():
+    """Regression for job f255d56b4243 (YouTube oFRbZJXjWIA).
+
+    LH pitches in the E2–B3 range must land on a part with a bass
+    clef, not on a part that inherits a treble clef. Before the
+    two-part / brace fix, music21's PartStaff encoding passed through
+    musicxml2ly as a single staff group with a dropped bass clef, and
+    LilyPond drew all LH notes as ledger-line stacks below the treble.
+    """
+    import xml.etree.ElementTree as etree
+
+    from backend.contracts import (
+        PianoScore,
+        ScoreMetadata,
+        ScoreNote,
+        TempoMapEntry,
+    )
+    from backend.services.engrave import _engrave_sync
+
+    # Minimal reproduction: four RH quarters in the C4–E6 range and four
+    # LH quarters in the E2–B3 range, one measure of 4/4.
+    rh = [
+        ScoreNote(id=f"rh-{i}", pitch=p, onset_beat=float(i), duration_beat=1.0, velocity=75, voice=1)
+        for i, p in enumerate([62, 67, 72, 76])  # D4, G4, C5, E5
+    ]
+    lh = [
+        ScoreNote(id=f"lh-{i}", pitch=p, onset_beat=float(i), duration_beat=1.0, velocity=75, voice=1)
+        for i, p in enumerate([40, 47, 54, 59])  # E2, B2, F#3, B3
+    ]
+    score = PianoScore(
+        right_hand=rh,
+        left_hand=lh,
+        metadata=ScoreMetadata(
+            key="B:minor",
+            time_signature=(4, 4),
+            tempo_map=[TempoMapEntry(time_sec=0.0, beat=0.0, bpm=136.0)],
+            difficulty="intermediate",
+            sections=[],
+            chord_symbols=[],
+        ),
+    )
+
+    _pdf, musicxml, _midi, _chords = _engrave_sync(score, title="bob", composer="")
+    root = etree.fromstring(musicxml)
+
+    parts = root.findall("part")
+    assert len(parts) == 2, f"expected two parts, got {len(parts)}"
+
+    # RH part → treble (G/2); LH part → bass (F/4).
+    rh_clef = parts[0].find("measure/attributes/clef")
+    lh_clef = parts[1].find("measure/attributes/clef")
+    assert rh_clef is not None and rh_clef.findtext("sign") == "G"
+    assert lh_clef is not None and lh_clef.findtext("sign") == "F"
+
+    # Every LH note lives on the LH part only.
+    lh_pitches_in_rh = [
+        int(n.findtext("pitch/octave")) for n in parts[0].iter("note")
+        if n.find("pitch") is not None and int(n.findtext("pitch/octave")) <= 3
+    ]
+    assert not lh_pitches_in_rh, (
+        f"LH-range pitches ended up on the RH part: {lh_pitches_in_rh}"
+    )
+
+
 def test_l2_bar_crossing_note_in_voice_is_split_with_tie():
     """A voice-2 note that crosses a bar line must be split into two
     tied notes — never emitted as a single over-long duration that
