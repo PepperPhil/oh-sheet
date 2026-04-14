@@ -39,7 +39,6 @@ class _ResultScreenState extends State<ResultScreen> {
   late final String _displayTitle;
   late final String? _displayArtist;
   late final String? _tuneChatJobId;
-  late final String? _tuneChatImageUrl;
   late final bool _hasTuneChat;
 
   static const _tuneChatBaseUrl = String.fromEnvironment(
@@ -66,7 +65,6 @@ class _ResultScreenState extends State<ResultScreen> {
         ?? (job.title?.startsWith('http') == true ? job.title : null);
 
     _tuneChatJobId = resultMap['tunechat_job_id'] as String?;
-    _tuneChatImageUrl = resultMap['tunechat_preview_image_url'] as String?;
     _hasTuneChat = _tuneChatJobId != null;
 
     SchedulerBinding.instance.addPostFrameCallback((_) {
@@ -191,11 +189,11 @@ class _ResultScreenState extends State<ResultScreen> {
             ),
           ),
         ],
-        if (_sourceUrl != null) ...[
+        if (_sourceUrl case final url?) ...[
           const SizedBox(height: 8),
           GestureDetector(
             onTap: () => launchUrl(
-              Uri.parse(_sourceUrl!),
+              Uri.parse(url),
               mode: LaunchMode.externalApplication,
             ),
             child: Row(
