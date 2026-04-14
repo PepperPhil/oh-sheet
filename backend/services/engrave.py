@@ -869,21 +869,22 @@ def _sanitize_musicxml_for_osmd(raw: bytes) -> bytes:
 
 
 def _remap_voices_per_staff(raw: bytes) -> bytes:
-    """Renumber voice tags per staff so each staff uses ``{1, 2}``.
+    """Renumber voice tags per ``<part>`` so each part uses ``{1, 2}``.
 
-    music21's exporter numbers voices globally within a ``<part>``
-    — a grand staff with two voices per hand gets voices ``{1..4}``.
-    OSMD's VexFlow backend crashes on ``voice ≥ 3``, so the old
-    sanitizer clamped every ``voice>=3`` to ``voice=2``. That merged
-    distinct musical lines into one voice, which MuseScore 4 reports
-    as "Score corrupted" when the merged voice's duration adds up
-    past the time signature.
+    Legacy contract: music21's exporter numbers voices globally within
+    a ``<part>`` — a grand staff with two voices per hand gets voices
+    ``{1..4}``. OSMD's VexFlow backend crashes on ``voice ≥ 3``, so we
+    compress to ``{1, 2}`` per grouping unit.
 
-    Correct fix: remap per staff. Collect the set of voice numbers
-    actually used on each staff and compress them to ``1..N``. Staves
-    independently get ``voice=1`` and ``voice=2`` — MusicXML voices
-    are part-scoped per the spec, but both MuseScore and OSMD treat
-    them per-staff, so this is the renderer-pleasing compromise.
+    Under the current two-part / brace encoding there is no ``<staff>``
+    element (each hand is its own ``<part>``), so the function's
+    ``staff = staff_el.text if staff_el is not None else cur_staff``
+    fallback collapses every note to the synthetic staff ``"1"`` — which
+    is exactly the per-part scope we want. The function continues to
+    work correctly; the ``per_staff`` name is historical.
+
+    Keeps defense-in-depth for any future path (e.g. condense) that may
+    emit 3+ voices on a hand. Safe to keep; cheap to run.
     """
     import xml.etree.ElementTree as ET  # noqa: PLC0415
 
