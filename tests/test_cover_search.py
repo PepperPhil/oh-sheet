@@ -41,6 +41,19 @@ class TestNormalizeTitle:
         assert normalize_title("Hotel California [Official Video]") == "hotel california"
         assert normalize_title("Hotel California (Official Music Video)") == "hotel california"
         assert normalize_title("Hotel California - Official Video") == "hotel california"
+        assert normalize_title("Hotel California - Official Audio") == "hotel california"
+        assert normalize_title("Hotel California - Official Lyric Video") == "hotel california"
+
+    def test_dash_official_pattern_does_not_overmatch(self):
+        """Narrow dash-prefix pattern only strips known video/audio suffixes.
+        Trailing text like 'release announcement' must survive so it can be
+        scored against the user's query.
+        """
+        from backend.services.cover_search import normalize_title
+        # "release announcement" is not a known variant — keep it.
+        assert normalize_title("Big Hit - Official release announcement") == (
+            "big hit - official release announcement"
+        )
 
     def test_strips_lyrics_tag(self):
         from backend.services.cover_search import normalize_title
@@ -514,6 +527,24 @@ class TestCoverSearchSettings:
         # karaoke and irrelevant results.
         from backend.config import settings
         assert 20 <= settings.cover_search_min_score <= 80
+
+    def test_cover_search_min_score_matches_find_clean_source_default(self):
+        """Drift check: the Settings default and ``find_clean_source``'s
+        signature default must agree, or operators who rely on the
+        function-level default will silently diverge from production
+        behavior. See also the ``sensible`` bound check above.
+        """
+        import inspect
+
+        from backend.config import Settings
+        from backend.services.cover_search import find_clean_source
+
+        settings_default = Settings.model_fields["cover_search_min_score"].default
+        sig_default = inspect.signature(find_clean_source).parameters["min_score"].default
+        assert settings_default == sig_default, (
+            f"cover_search_min_score drift: Settings={settings_default} vs "
+            f"find_clean_source={sig_default}"
+        )
 
     def test_cover_search_settings_overridable_via_env(self, monkeypatch):
         # pydantic-settings reads OHSHEET_* at Settings() construction,

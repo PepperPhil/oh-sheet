@@ -241,7 +241,14 @@ _NOISE_PATTERNS: tuple[re.Pattern[str], ...] = (
     # Catch-all for "[Official ...]" and "(Official ...)" — covers video,
     # visualizer, audio, lyric video, and any future YouTube label variants.
     re.compile(r"\s*[\[\(]\s*official\s+[^\]\)]*[\]\)]", re.IGNORECASE),
-    re.compile(r"\s*-\s*official\s+\w+(\s+\w+)?", re.IGNORECASE),
+    # Dash-prefixed variants like "- Official Music Video". Enumerate the
+    # known suffixes instead of `\w+(\s+\w+)?` — the open-ended version
+    # would also eat legitimate trailing text ("- Official release
+    # announcement") and strip meaningful words from the title.
+    re.compile(
+        r"\s*-\s*official\s+(music\s+video|lyric\s+video|video|audio|visualizer|mv)\b",
+        re.IGNORECASE,
+    ),
     # "(Lyrics)", "[Lyric Video]"
     re.compile(r"\s*[\[\(]\s*lyrics?\s*(video)?\s*[\]\)]", re.IGNORECASE),
     # "(HD)", "[4K Remaster]", "(Remastered 2020)"

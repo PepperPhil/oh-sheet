@@ -338,6 +338,10 @@ class PipelineRunner:
                                     )
                                 else:
                                     log.warning("tunechat-only: returned None, falling back to Oh Sheet pipeline")
+                            # Silent-failure contract: any error (network,
+                            # SDK, blob read) drops us to the Oh Sheet
+                            # pipeline below. Never crash the job just
+                            # because the optional TuneChat path failed.
                             except Exception as exc:  # noqa: BLE001
                                 log.warning("tunechat-only: failed (%s), falling back to Oh Sheet pipeline", exc)
 

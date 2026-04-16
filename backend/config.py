@@ -530,7 +530,25 @@ class Settings(BaseSettings):
     # (flatten all tracks into one piano stream) then transform (apply
     # difficulty shaping). Produces a denser, more complete MIDI than
     # the single-pass arrange mode.
+    #
+    # ``condense_transform`` is accepted as a deprecated alias of
+    # ``condense_only`` for one release — deployed environments may
+    # still carry the old value in their .env.
     score_pipeline: ScorePipelineMode = "condense_only"
+
+    @field_validator("score_pipeline", mode="before")
+    @classmethod
+    def _alias_condense_transform(cls, v: object) -> object:
+        if v == "condense_transform":
+            import warnings
+            warnings.warn(
+                "OHSHEET_SCORE_PIPELINE='condense_transform' is deprecated; "
+                "use 'condense_only'. Support will be removed in the next release.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            return "condense_only"
+        return v
 
     # ── TuneChat integration ──────────────────────────────────────────
     # When enabled, Oh Sheet sends audio to TuneChat's transcription
@@ -543,6 +561,12 @@ class Settings(BaseSettings):
     # Env: OHSHEET_TUNECHAT_URL (the base URL of a running TuneChat)
     # Env: OHSHEET_TUNECHAT_API_KEY (Bearer token for /api/v1/transcribe)
     # Env: OHSHEET_TUNECHAT_TIMEOUT_SEC (max wait before giving up)
+    #
+    # Note: ``tunechat_timeout_sec`` is the synchronous upper bound for
+    # ``httpx.AsyncClient.post`` inside the ingest stage. Because the
+    # runner ``await``s the response before returning, the Celery worker
+    # handling the job is pinned for up to this duration (5 min default).
+    # Size worker concurrency accordingly when TuneChat is enabled.
     tunechat_enabled: bool = False
     tunechat_url: str = "http://localhost:3000"
     tunechat_api_key: str = ""

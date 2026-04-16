@@ -85,6 +85,9 @@ async def transcribe_via_tunechat(
     except (KeyError, ValueError) as exc:
         log.warning("tunechat: bad response: %s", exc)
         return None
+    # Silent-failure contract (see module docstring): any other exception
+    # — network, SDK bug, serialization glitch — returns None so the
+    # caller falls back to Oh Sheet's own pipeline.
     except Exception as exc:  # noqa: BLE001
         log.warning("tunechat: unexpected error: %s", exc)
         return None

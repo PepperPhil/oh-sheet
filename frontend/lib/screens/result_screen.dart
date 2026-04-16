@@ -106,8 +106,13 @@ class _ResultScreenState extends State<ResultScreen> {
                 _hasTuneChat
                     ? _buildTuneChatEmbed(sheetH)
                     : _buildSheetSection(sheetH),
-                const SizedBox(height: 20),
-                _buildDownloads(),
+                // TuneChat's iframe ships its own download controls, and
+                // the TuneChat short-circuit leaves pdf/midi/musicxml
+                // artifact URIs empty — rendering our buttons would 404.
+                if (!_hasTuneChat) ...[
+                  const SizedBox(height: 20),
+                  _buildDownloads(),
+                ],
                 SizedBox(height: twoCol ? 24 : 32),
                 _buildAgainButton(),
               ],
