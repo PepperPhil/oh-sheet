@@ -859,24 +859,59 @@ def _render_musicxml_bytes(
 
 
 def _clear_part_names(raw: bytes) -> bytes:
-    """Clear ``<part-name>`` text in ``<score-part>`` entries.
+    """Clear ``<part-name>`` text and normalise UUID-based ``id`` attributes
+    in ``<score-part>`` / ``<part>`` entries.
 
     music21 populates ``<part-name>`` with its internal part identifier
-    when no explicit ``partName`` is set on the ``Part`` object. OSMD
-    reads this and displays it as a per-staff instrument label (e.g.
-    "Instr. P-RH"). The ``<part-group>`` wrapper already carries
-    ``<group-name>Piano</group-name>`` from the ``StaffGroup``, which
-    OSMD uses for the brace label — per-part names are redundant.
+    when no explicit ``partName`` is set on the ``Part`` object, and
+    stamps a UUID (e.g. ``P656136d3be63a1d6…``) as the ``id`` attribute
+    on both ``<score-part>`` and ``<part>`` even when a clean ``id`` was
+    passed to the ``Part()`` constructor.  OSMD uses ``<group-name>``
+    from the brace ``<part-group>`` as the primary label, but falls back
+    to the ``<score-part id>`` when ``<part-name>`` is empty — rendering
+    it as *"Instr. P656136d…"*.  Clearing the text and renaming the ids
+    to ``P1``, ``P2``, … eliminates both the per-staff label and the
+    fallback.
     """
     import xml.etree.ElementTree as ET  # noqa: PLC0415
 
     root = ET.fromstring(raw)
+
+    # Build a map from old UUID-based ids → clean sequential ids.
     part_list = root.find("part-list")
+    id_remap: dict[str, str] = {}
     if part_list is not None:
-        for score_part in part_list.findall("score-part"):
+        for idx, score_part in enumerate(part_list.findall("score-part"), start=1):
+            old_id = score_part.get("id", "")
+            new_id = f"P{idx}"
+            id_remap[old_id] = new_id
+            score_part.set("id", new_id)
+
             part_name = score_part.find("part-name")
             if part_name is not None:
                 part_name.text = ""
+
+            # Also clear <instrument-name> inside <score-instrument> —
+            # another source of UUID labels in some OSMD versions.
+            for si in score_part.findall("score-instrument"):
+                old_si_id = si.get("id", "")
+                if old_si_id:
+                    si.set("id", old_si_id.replace(old_id, new_id))
+                instr_name = si.find("instrument-name")
+                if instr_name is not None:
+                    instr_name.text = ""
+
+            # Update <midi-instrument> references too.
+            for mi in score_part.findall("midi-instrument"):
+                old_mi_id = mi.get("id", "")
+                if old_mi_id:
+                    mi.set("id", old_mi_id.replace(old_id, new_id))
+
+    # Rename matching <part id="..."> elements.
+    for part in root.findall("part"):
+        old_id = part.get("id", "")
+        if old_id in id_remap:
+            part.set("id", id_remap[old_id])
 
     prefix_end = raw.find(b"<score-partwise")
     prefix = raw[:prefix_end] if prefix_end > 0 else b""

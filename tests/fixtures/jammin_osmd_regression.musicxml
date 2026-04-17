@@ -25,16 +25,16 @@
       <group-symbol>brace</group-symbol>
       <group-barline>yes</group-barline>
     </part-group>
-    <score-part id="Pee15f9a4d6a4febf99d325b16bd7f6c4">
+    <score-part id="P1">
       <part-name />
     </score-part>
-    <score-part id="Pb08f934ed0f7b7b81444c1c66fccfd18">
+    <score-part id="P2">
       <part-name />
     </score-part>
     <part-group number="1" type="stop" />
   </part-list>
   
-  <part id="Pee15f9a4d6a4febf99d325b16bd7f6c4">
+  <part id="P1">
     
     <measure implicit="no" number="1">
       <attributes>
@@ -187,7 +187,7 @@
       </measure>
   </part>
   
-  <part id="Pb08f934ed0f7b7b81444c1c66fccfd18">
+  <part id="P2">
     
     <measure implicit="no" number="1">
       <attributes>

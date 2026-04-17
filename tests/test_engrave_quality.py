@@ -959,21 +959,32 @@ def test_engrave_does_not_leak_music21_defaults():
 
 
 @pytest.mark.parametrize("name", FIXTURE_NAMES)
-def test_l2_part_names_are_empty(name: str, engraved_artifacts):
-    """<part-name> must be empty — the <group-name>Piano</group-name> on
-    the brace is the only instrument label. Non-empty <part-name> causes
-    OSMD to display a redundant label per staff (e.g., "Instr. P-RH").
+def test_l2_part_names_and_ids_are_clean(name: str, engraved_artifacts):
+    """``<part-name>`` must be empty and ``<score-part id>`` must not
+    contain music21 UUIDs.  The ``<group-name>Piano</group-name>`` on
+    the brace is the only instrument label.  Non-empty ``<part-name>``
+    or a UUID-based ``id`` causes OSMD to display a redundant per-staff
+    label (e.g. ``"Instr. P656136d3…"``).
     """
+    import re
+
     from lxml import etree
 
     musicxml, _ = engraved_artifacts[name]
     root = etree.fromstring(musicxml)
+
+    _UUID_PART_ID = re.compile(r"^P[0-9a-f]{16,}$", re.IGNORECASE)
+
     for score_part in root.findall("part-list/score-part"):
         pn = score_part.find("part-name")
-        if pn is None:
-            continue
-        assert pn.text is None or pn.text.strip() == "", (
-            f"{name}: <part-name> should be empty, got {pn.text!r}"
+        if pn is not None:
+            assert pn.text is None or pn.text.strip() == "", (
+                f"{name}: <part-name> should be empty, got {pn.text!r}"
+            )
+
+        sp_id = score_part.get("id", "")
+        assert not _UUID_PART_ID.match(sp_id), (
+            f"{name}: <score-part id> looks like a music21 UUID: {sp_id!r}"
         )
 
 
@@ -2040,10 +2051,20 @@ def test_l2_osmd_regression_fixture_structural_checks():
 
     root = etree.fromstring(fixture_path.read_bytes())
 
-    # Part names must be empty.
-    for pn in root.findall("part-list/score-part/part-name"):
-        assert pn.text is None or pn.text.strip() == "", (
-            f"regression fixture has non-empty <part-name>: {pn.text!r}"
+    import re
+
+    _UUID_PART_ID = re.compile(r"^P[0-9a-f]{16,}$", re.IGNORECASE)
+
+    # Part names must be empty and ids must not be music21 UUIDs.
+    for sp in root.findall("part-list/score-part"):
+        pn = sp.find("part-name")
+        if pn is not None:
+            assert pn.text is None or pn.text.strip() == "", (
+                f"regression fixture has non-empty <part-name>: {pn.text!r}"
+            )
+        sp_id = sp.get("id", "")
+        assert not _UUID_PART_ID.match(sp_id), (
+            f"regression fixture has UUID <score-part id>: {sp_id!r}"
         )
 
     # Brace group with "Piano" label must exist.
