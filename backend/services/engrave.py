@@ -965,12 +965,11 @@ def _fix_voice_collision_chord_tags(raw: bytes) -> bytes:
             # --- Pass 3: restructure measure ---
             # Keep non-note/backup/forward elements (attributes, directions,
             # barlines) in their original positions at the front.
-            # NOTE: mid-measure <direction> elements are relocated to the front.
-            # In practice music21 places them at measure boundaries, so this
-            # doesn't affect current output. A future improvement could track
+            # NOTE: mid-measure <direction> elements and grace notes are
+            # relocated to the front of the rebuilt measure.  In practice
+            # music21 places both at measure boundaries, so this doesn't
+            # affect current output.  A future improvement could track
             # their original positions and re-interleave them.
-            # Grace notes were excluded from note_data (not collision-tracked)
-            # but must still be preserved verbatim in the rebuilt measure.
             static_elems = [
                 el for el in elem_list
                 if el.tag not in ("note", "backup", "forward")
@@ -1039,8 +1038,13 @@ def _fix_voice_collision_chord_tags(raw: bytes) -> bytes:
                         else:
                             first_pitched_seen = True
                         measure.append(el)
-                    # Duration of this onset slot = first (non-chord) note's dur.
-                    cur_end = onset + notes_at_onset[0][0]
+                    # Duration of this onset slot = first pitched note's dur
+                    # (rests may precede pitched notes at the same onset).
+                    anchor_dur = next(
+                        (d for d, _, is_r in notes_at_onset if not is_r),
+                        notes_at_onset[0][0],
+                    )
+                    cur_end = onset + anchor_dur
 
                 voice_ends[voice_id] = cur_end
 
