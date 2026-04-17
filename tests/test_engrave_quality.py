@@ -960,11 +960,9 @@ def test_engrave_does_not_leak_music21_defaults():
 
 @pytest.mark.parametrize("name", FIXTURE_NAMES)
 def test_l2_part_names_and_ids_are_clean(name: str, engraved_artifacts):
-    """``<part-name>`` must be empty and ``<score-part id>`` must not
-    contain music21 UUIDs.  The ``<group-name>Piano</group-name>`` on
-    the brace is the only instrument label.  Non-empty ``<part-name>``
-    or a UUID-based ``id`` causes OSMD to display a redundant per-staff
-    label (e.g. ``"Instr. P656136d3…"``).
+    """``<part-name>`` must be ``"Piano"`` and ``<score-part id>`` must
+    not contain music21 UUIDs.  Both staves carry the same label so OSMD
+    displays ``"Piano"`` on each staff, matching the brace group name.
     """
     import re
 
@@ -978,8 +976,8 @@ def test_l2_part_names_and_ids_are_clean(name: str, engraved_artifacts):
     for score_part in root.findall("part-list/score-part"):
         pn = score_part.find("part-name")
         if pn is not None:
-            assert pn.text is None or pn.text.strip() == "", (
-                f"{name}: <part-name> should be empty, got {pn.text!r}"
+            assert pn.text == "Piano", (
+                f"{name}: <part-name> should be 'Piano', got {pn.text!r}"
             )
 
         sp_id = score_part.get("id", "")
@@ -2059,8 +2057,8 @@ def test_l2_osmd_regression_fixture_structural_checks():
     for sp in root.findall("part-list/score-part"):
         pn = sp.find("part-name")
         if pn is not None:
-            assert pn.text is None or pn.text.strip() == "", (
-                f"regression fixture has non-empty <part-name>: {pn.text!r}"
+            assert pn.text == "Piano", (
+                f"regression fixture <part-name> should be 'Piano', got {pn.text!r}"
             )
         sp_id = sp.get("id", "")
         assert not _UUID_PART_ID.match(sp_id), (

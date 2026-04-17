@@ -26,10 +26,10 @@
       <group-barline>yes</group-barline>
     </part-group>
     <score-part id="P1">
-      <part-name />
+      <part-name>Piano</part-name>
     </score-part>
     <score-part id="P2">
-      <part-name />
+      <part-name>Piano</part-name>
     </score-part>
     <part-group number="1" type="stop" />
   </part-list>

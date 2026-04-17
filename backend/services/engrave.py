@@ -869,9 +869,9 @@ def _clear_part_names(raw: bytes) -> bytes:
     passed to the ``Part()`` constructor.  OSMD uses ``<group-name>``
     from the brace ``<part-group>`` as the primary label, but falls back
     to the ``<score-part id>`` when ``<part-name>`` is empty — rendering
-    it as *"Instr. P656136d…"*.  Clearing the text and renaming the ids
-    to ``P1``, ``P2``, … eliminates both the per-staff label and the
-    fallback.
+    it as *"Instr. P656136d…"*.  Setting the part name to ``"Piano"``
+    and renaming the ids to ``P1``, ``P2``, … gives both staves a clean
+    label that matches the brace group name.
     """
     import xml.etree.ElementTree as ET  # noqa: PLC0415
 
@@ -889,7 +889,7 @@ def _clear_part_names(raw: bytes) -> bytes:
 
             part_name = score_part.find("part-name")
             if part_name is not None:
-                part_name.text = ""
+                part_name.text = "Piano"
 
             # Also clear <instrument-name> inside <score-instrument> —
             # another source of UUID labels in some OSMD versions.
