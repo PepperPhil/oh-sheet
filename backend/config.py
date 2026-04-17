@@ -8,7 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from pydantic import field_validator
+from pydantic import computed_field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from backend.contracts import ScorePipelineMode
@@ -489,12 +489,26 @@ class Settings(BaseSettings):
     # The refine stage uses Anthropic Claude + the built-in web_search tool to
     # produce human-readable score metadata (title, composer, key, tempo
     # marking, section structure, repeats). See backend/services/refine.py.
-    refine_enabled: bool = True
+    # refine_enabled is derived: True when anthropic_api_key is set.
+    # Set OHSHEET_REFINE_ENABLED=false to force-disable even with a key.
+    refine_enabled: bool | None = None        # None = auto (key present → on)
     refine_model: str = "claude-sonnet-4-6"
     refine_max_searches: int = 5              # web_search cap per refinement
     refine_budget_sec: int = 300              # overall wall-time budget
     refine_call_timeout_sec: int = 120        # per-API-call timeout
-    anthropic_api_key: str | None = None      # required when refine_enabled
+    anthropic_api_key: str | None = None
+
+    @computed_field
+    @property
+    def refine_active(self) -> bool:
+        """Whether the refine stage actually runs.
+
+        Auto-derives from key presence unless explicitly overridden via
+        OHSHEET_REFINE_ENABLED.
+        """
+        if self.refine_enabled is not None:
+            return self.refine_enabled
+        return self.anthropic_api_key is not None
 
     @field_validator(
         "cleanup_energy_gate_floor_ratio",

@@ -159,7 +159,7 @@ async def create_job(
     config = PipelineConfig(
         variant=variant,
         skip_humanizer=body.skip_humanizer,
-        enable_refine=settings.refine_enabled,
+        enable_refine=settings.refine_active,
         score_pipeline=settings.score_pipeline,
     )
     record = await manager.submit(bundle, config)

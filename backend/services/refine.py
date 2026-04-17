@@ -103,7 +103,7 @@ class RefineService:
                 self._call_llm(score, title_hint, artist_hint, filename_hint),
                 timeout=settings.refine_budget_sec,
             )
-        except TimeoutError:
+        except (TimeoutError, asyncio.TimeoutError):
             log.warning(
                 "refine: budget exceeded (%ss), passing through",
                 settings.refine_budget_sec,
@@ -199,6 +199,19 @@ class RefineService:
                 if getattr(block, "type", None) == "tool_use" and getattr(block, "name", None) == "submit_refinements":
                     raw = block.input
                     return dict(raw) if isinstance(raw, dict) else json.loads(str(raw))
+            # Distinguish "model used web_search but never submitted" from
+            # "model produced no tool calls at all" so operators can tell
+            # whether a multi-turn loop would have helped.
+            tool_names = [
+                getattr(b, "name", None)
+                for b in response.content
+                if getattr(b, "type", None) == "tool_use"
+            ]
+            if tool_names:
+                log.warning(
+                    "refine: model called %s but not submit_refinements",
+                    tool_names,
+                )
             return None
 
         if last_exc is not None:
@@ -214,8 +227,12 @@ class RefineService:
         artist_hint: str | None,
         filename_hint: str | None,
     ) -> str:
+        # Hash only the score (the actual substance being refined), not the
+        # wrapper — HumanizedPerformance.quality.warnings is mutable and would
+        # defeat the cache when an upstream stage appends a warning.
+        score = payload.score if isinstance(payload, HumanizedPerformance) else payload
         canon = json.dumps(
-            payload.model_dump(mode="json"),
+            score.model_dump(mode="json"),
             sort_keys=True,
             separators=(",", ":"),
             default=str,
