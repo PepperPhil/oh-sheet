@@ -135,16 +135,16 @@ def test_artifact_proxies_musicxml_from_tunechat(client, monkeypatch):
         def __enter__(self): return self
         def __exit__(self, *a): return False
         def get(self, url):
-            assert url == "https://tunechat.example/pipeline/tc-fake-123/score.musicxml"
+            assert url == "http://localhost:3000/pipeline/tc-fake-123/score.musicxml"
             return FakeResponse()
 
     monkeypatch.setattr("backend.api.routes.artifacts.httpx.Client", FakeClient)
 
     job_id = _install_tunechat_job(
         client,
-        pdf="https://tunechat.example/pipeline/tc-fake-123/sheet.pdf",
-        musicxml="https://tunechat.example/pipeline/tc-fake-123/score.musicxml",
-        midi="https://tunechat.example/pipeline/tc-fake-123/notation.mid",
+        pdf="http://localhost:3000/pipeline/tc-fake-123/sheet.pdf",
+        musicxml="http://localhost:3000/pipeline/tc-fake-123/score.musicxml",
+        midi="http://localhost:3000/pipeline/tc-fake-123/notation.mid",
     )
     response = client.get(f"/v1/artifacts/{job_id}/musicxml")
     assert response.status_code == 200
@@ -173,7 +173,7 @@ def test_artifact_proxies_pdf_from_tunechat(client, monkeypatch):
 
     job_id = _install_tunechat_job(
         client,
-        pdf="https://tunechat.example/pipeline/tc-fake-123/sheet.pdf",
+        pdf="http://localhost:3000/pipeline/tc-fake-123/sheet.pdf",
         musicxml=None,
         midi=None,
     )
@@ -211,7 +211,63 @@ def test_artifact_upstream_failure_returns_502(client, monkeypatch):
     job_id = _install_tunechat_job(
         client,
         pdf=None,
-        musicxml="https://tunechat.example/pipeline/tc-fake-123/score.musicxml",
+        musicxml="http://localhost:3000/pipeline/tc-fake-123/score.musicxml",
+        midi=None,
+    )
+    response = client.get(f"/v1/artifacts/{job_id}/musicxml")
+    assert response.status_code == 502
+
+
+def test_artifact_refuses_proxy_to_foreign_host(client, monkeypatch):
+    """SSRF guard: if the tunechat_*_url points somewhere other than the
+    configured TuneChat host, refuse with 502 BEFORE firing the request.
+
+    Simulates a TuneChat response that (whether via compromise or
+    misconfiguration) returns an internal/external URL we shouldn't be
+    proxying. The httpx.Client mock raises on any .get() so the test
+    fails loudly if the guard is bypassed.
+    """
+    class ExplodeClient:
+        def __init__(self, *a, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def get(self, url):
+            raise AssertionError(f"SSRF guard bypassed — fetched {url}")
+
+    monkeypatch.setattr("backend.api.routes.artifacts.httpx.Client", ExplodeClient)
+
+    job_id = _install_tunechat_job(
+        client,
+        pdf=None,
+        # settings.tunechat_url is http://localhost:3000 by default; this
+        # URL points at a host NOT in the allowlist (classic SSRF
+        # attempt targeting AWS IMDS).
+        musicxml="http://169.254.169.254/latest/meta-data/iam/security-credentials/",
+        midi=None,
+    )
+    response = client.get(f"/v1/artifacts/{job_id}/musicxml")
+    assert response.status_code == 502
+    assert "not allowed" in response.json()["detail"].lower()
+
+
+def test_artifact_proxy_scheme_mismatch_is_rejected(client, monkeypatch):
+    """Scheme mismatch (https target vs http configured) also blocked —
+    prevents downgrade/upgrade attacks where an attacker swaps
+    http://internal.svc for https://internal.svc expecting only host
+    matching."""
+    class ExplodeClient:
+        def __init__(self, *a, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def get(self, url):
+            raise AssertionError("SSRF guard bypassed")
+
+    monkeypatch.setattr("backend.api.routes.artifacts.httpx.Client", ExplodeClient)
+
+    job_id = _install_tunechat_job(
+        client,
+        pdf=None,
+        musicxml="https://localhost:3000/pipeline/tc-fake-123/score.musicxml",  # https, not http
         midi=None,
     )
     response = client.get(f"/v1/artifacts/{job_id}/musicxml")

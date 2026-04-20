@@ -16,12 +16,14 @@ from __future__ import annotations
 
 import logging
 from typing import Annotated, Literal
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 
 from backend.api.deps import get_blob_store, get_job_manager
+from backend.config import settings
 from backend.jobs.manager import JobManager
 from backend.storage.local import LocalBlobStore
 
@@ -48,6 +50,35 @@ _KIND_INFO: dict[str, tuple[str, str | None, str, str]] = {
 # httpx timeout for the TuneChat proxy fetch. Short because the file
 # already exists on TuneChat's disk — this is just a LAN-ish transfer.
 _PROXY_TIMEOUT_SEC = 30.0
+
+
+def _is_allowed_proxy_target(url: str) -> bool:
+    """SSRF defense: only allow proxy fetches to the configured TuneChat
+    base URL (scheme + host + port). The URL in ``tunechat_*_url`` comes
+    from TuneChat's API response — if TuneChat were ever compromised or
+    misconfigured to return a URL pointing at an internal service (AWS
+    IMDS, a DB admin panel, etc.), we'd happily proxy it without this
+    check. Strict equality of (scheme, hostname, port) is enough since
+    we ship a single TuneChat deployment per environment; multi-tenant
+    would need an allowlist.
+    """
+    try:
+        target = urlparse(url)
+        allowed = urlparse(settings.tunechat_url)
+    except ValueError:
+        return False
+    if not target.hostname or not allowed.hostname:
+        return False
+    return (
+        target.scheme == allowed.scheme
+        and target.hostname == allowed.hostname
+        and (target.port or _default_port(target.scheme))
+        == (allowed.port or _default_port(allowed.scheme))
+    )
+
+
+def _default_port(scheme: str) -> int | None:
+    return {"http": 80, "https": 443}.get(scheme)
 
 
 @router.get("/artifacts/{job_id}/{kind}")
@@ -82,11 +113,28 @@ def download_artifact(
     # blob URI is empty — fall through to the hosted URL.
     tunechat_url = getattr(record.result, tunechat_attr) if tunechat_attr else None
     if tunechat_url:
+        # SSRF guard — only proxy to the configured TuneChat host. See
+        # _is_allowed_proxy_target for rationale. Refuse with 502 so the
+        # client sees an "upstream issue" rather than a 500 (which would
+        # suggest an Oh Sheet bug).
+        if not _is_allowed_proxy_target(tunechat_url):
+            log.warning(
+                "artifacts: refused to proxy %s/%s — target host not in allowlist",
+                job_id, kind,
+            )
+            raise HTTPException(
+                status_code=502,
+                detail="Upstream artifact host is not allowed.",
+            )
         try:
             with httpx.Client(timeout=_PROXY_TIMEOUT_SEC, follow_redirects=True) as client:
                 response = client.get(tunechat_url)
                 response.raise_for_status()
         except httpx.HTTPError as exc:
+            # NOTE: we log `tunechat_url` directly. Today those are path-
+            # only URLs (no query string) so this is safe. If TuneChat
+            # ever switches to signed URLs with ?token=... credentials,
+            # strip the query before logging — see TuneChatResult.
             log.warning(
                 "artifacts: TuneChat proxy fetch failed for %s/%s (%s): %s",
                 job_id, kind, tunechat_url, exc,
