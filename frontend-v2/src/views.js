@@ -37,9 +37,15 @@ function isYoutubeVideoUrl(s) {
   return typeof s === "string" && YOUTUBE_VIDEO_RE.test(s.trim());
 }
 
+// Demo-day scope (Apr 20): YouTube is the only source routed through
+// TuneChat for transcription. Audio + MIDI uploads still exist in the
+// backend but aren't plumbed through the TuneChat fast-path yet, and
+// we don't want the landing page advertising options we can't run on
+// stage. The segmented picker auto-hides when SOURCES has <= 1 entry
+// (see `segmented()`), so reducing to a single entry is enough to
+// kill the picker entirely without touching CSS or the branch logic
+// in `idleBody()`. Re-adding audio/midi later is a 2-line restore.
 const SOURCES = [
-  { key: "audio", label: "Audio" },
-  { key: "midi", label: "MIDI" },
   { key: "youtube", label: "YouTube" },
 ];
 
@@ -89,6 +95,11 @@ function icon(name) {
 // ── sub-components ───────────────────────────────────────────────────
 
 function segmented(activeSource, onSourceChange) {
+  // Auto-hide when only one source is available — a segmented picker
+  // with a single button is UX noise, not a choice. Callers can still
+  // unconditionally append the returned node; `null` is tolerated by
+  // appendChild() below.
+  if (SOURCES.length <= 1) return null;
   const wrap = el("div", { class: "segmented" });
   for (const src of SOURCES) {
     const isActive = src.key === activeSource;
@@ -175,7 +186,10 @@ function tryPasteYoutube(input) {
 
 function idleBody(source, handlers) {
   const wrap = el("div", { class: "body" });
-  wrap.appendChild(segmented(source, handlers.onSourceChange));
+  // segmented() returns null when SOURCES.length <= 1 (auto-hide);
+  // native appendChild() rejects null, so guard the call.
+  const picker = segmented(source, handlers.onSourceChange);
+  if (picker) wrap.appendChild(picker);
 
   let fileInput = null;
   let selectedFile = null;
@@ -445,6 +459,12 @@ function completeBody(job) {
       "aria-label": "Toggle fullscreen",
       title: "Fullscreen",
     }, icon("fullscreen"));
+    // Target the WRAPPER, not the iframe, so the button stays visible
+    // in fullscreen mode and the click-to-exit path is reachable.
+    // Requesting fullscreen on the iframe alone would hide the button
+    // (the button is its sibling, not a descendant), leaving Escape
+    // as the only exit.
+    const iframeStub = el("div", { class: "iframe-stub tunechat" }, frame, fullscreenBtn);
     fullscreenBtn.addEventListener("click", () => {
       // Exit if already fullscreen, otherwise enter. Swallow the
       // returned promise — failures are surfaced by the browser as
@@ -453,8 +473,8 @@ function completeBody(job) {
       try {
         if (document.fullscreenElement) {
           document.exitFullscreen();
-        } else if (typeof frame.requestFullscreen === "function") {
-          frame.requestFullscreen();
+        } else if (typeof iframeStub.requestFullscreen === "function") {
+          iframeStub.requestFullscreen();
         }
       } catch {
         // Older browsers / sandboxed iframes — silent no-op.
@@ -462,7 +482,7 @@ function completeBody(job) {
     });
     // .iframe-stub.tunechat triggers the fullscreen-ish mobile CSS
     // where the iframe fills the viewport and the card sheds its padding.
-    wrap.appendChild(el("div", { class: "iframe-stub tunechat" }, frame, fullscreenBtn));
+    wrap.appendChild(iframeStub);
   } else {
     wrap.appendChild(
       el(

@@ -223,20 +223,27 @@ body[data-phase="submitting"] .tagline { display: none; }
   height: min(70vh, 720px); background: var(--surface);
   border: 2px solid var(--stroke); border-radius: 20px;
   margin-bottom: 16px; overflow: hidden;
-  /* position:relative anchors the fullscreen overlay button. */
-  position: relative;
 }
+/* Only the iframe-stub gets position:relative — it anchors the
+   absolutely-positioned fullscreen overlay button. .inline-render
+   has no overlay children so it doesn't need a stacking context. */
+.iframe-stub { position: relative; }
 .iframe-stub iframe {
   width: 100%; height: 100%; border: 0; display: block;
 }
 .iframe-stub.tunechat { height: min(80vh, 760px); }
 
-/* Fullscreen overlay button — top-right corner of the iframe wrap,
-   matching YouTube / Vimeo / Figma convention. Hover-reveals on
-   desktop so the chrome stays minimal; always visible on touch. */
+/* Fullscreen overlay button — bottom-right corner of the iframe wrap.
+   Originally placed top-right (YouTube/Vimeo convention), but the
+   TuneChat embed renders its own Play/Pause/Stop controls in the
+   same top-right region, causing a visual collision on hover. The
+   iframe's bottom-right is only occupied by small attribution text,
+   so the overlay can live there without fighting for pixels with
+   interactive chrome. Hover-reveals on desktop; always visible on
+   touch. */
 .fullscreen-btn {
   position: absolute;
-  top: 12px; right: 12px;
+  bottom: 12px; right: 12px;
   width: 36px; height: 36px;
   display: inline-flex; align-items: center; justify-content: center;
   background: rgba(0, 0, 0, 0.55);
@@ -252,9 +259,11 @@ body[data-phase="submitting"] .tagline { display: none; }
 .iframe-stub:hover .fullscreen-btn,
 .fullscreen-btn:focus-visible { opacity: 1; }
 .fullscreen-btn:hover { background: rgba(0, 0, 0, 0.75); }
-/* When the iframe itself is fullscreen, the button rides along in
-   the top-right of the fullscreen viewport. */
-.iframe-stub iframe:fullscreen { background: var(--surface); }
+/* When the iframe-stub is fullscreen, its iframe child fills the
+   viewport and the overlay button rides along (both are inside the
+   wrapper that goes fullscreen, not the iframe alone). */
+.iframe-stub:fullscreen { background: var(--surface); }
+.iframe-stub:fullscreen iframe { height: 100%; width: 100%; }
 
 /* Desktop results page — let the card breathe so OSMD can lay staves
    out at a readable width. Typical "reading width" territory; the card
